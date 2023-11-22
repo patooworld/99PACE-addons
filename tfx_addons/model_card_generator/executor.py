@@ -18,6 +18,7 @@ The ModelCard Executor handles the ModelCardToolkit workflow in the
 ModelCardGenerator.
 """
 
+import tempfile
 from typing import Any, Dict, List, Optional
 
 from model_card_toolkit import core
@@ -25,6 +26,7 @@ from model_card_toolkit.utils import source as src
 from tfx import types
 from tfx.dsl.components.base.base_executor import BaseExecutor
 from tfx.types import artifact_utils, standard_component_specs
+from tfx.utils import io_utils
 
 _DEFAULT_MODEL_CARD_FILE_NAME = 'model_card.html'
 
@@ -33,23 +35,35 @@ class Executor(BaseExecutor):
   """Executor for Model Card TFX component."""
   def _tfma_source(
       self,
-      input_dict: Dict[str, List[types.Artifact]]) -> Optional[src.TfmaSource]:
+      input_dict: Dict[str, List[types.Artifact]],
+      exec_properties: Dict[str, Any],
+  ) -> Optional[src.TfmaSource]:
     """See base class."""
     if not input_dict.get(standard_component_specs.EVALUATION_KEY):
       return None
     else:
-      return src.TfmaSource(model_evaluation_artifacts=input_dict[
-          standard_component_specs.EVALUATION_KEY])
+      return src.TfmaSource(
+          model_evaluation_artifacts=input_dict[
+              standard_component_specs.EVALUATION_KEY],
+          metrics_include=exec_properties.get('metrics_include', []),
+          metrics_exclude=exec_properties.get('metrics_exclude', []),
+      )
 
   def _tfdv_source(
       self,
-      input_dict: Dict[str, List[types.Artifact]]) -> Optional[src.TfdvSource]:
+      input_dict: Dict[str, List[types.Artifact]],
+      exec_properties: Dict[str, Any],
+  ) -> Optional[src.TfdvSource]:
     """See base class."""
     if not input_dict.get(standard_component_specs.STATISTICS_KEY):
       return None
     else:
-      return src.TfdvSource(example_statistics_artifacts=input_dict[
-          standard_component_specs.STATISTICS_KEY])
+      return src.TfdvSource(
+          example_statistics_artifacts=input_dict[
+              standard_component_specs.STATISTICS_KEY],
+          features_include=exec_properties.get('features_include', []),
+          features_exclude=exec_properties.get('features_exclude', []),
+      )
 
   def _model_source(
       self,
@@ -100,15 +114,32 @@ class Executor(BaseExecutor):
           `ModelCardToolkit`'s default HTML template
           (`default_template.html.jinja`) and file name (`model_card.html`)
           are used.
+        - features_include: The feature paths to include for the dataset
+          statistics.
+          By default, all features are included. Mutually exclusive with
+          features_exclude.
+        - features_exclude: The feature paths to exclude for the dataset
+          statistics.
+          By default, all features are included. Mutually exclusive with
+          features_include.
+        - metrics_include: The list of metric names to include in the model
+          card. By default, all metrics are included. Mutually exclusive with
+          metrics_exclude.
+        - metrics_exclude: The list of metric names to exclude in the model
+          card. By default, no metrics are excluded. Mutually exclusive with
+          metrics_include.
     """
+
+    # Make local temp directory to support remote storage (gcs, s3, ...)
+    temp_output_dir = tempfile.mkdtemp()
 
     # Initialize ModelCardToolkit
     mct = core.ModelCardToolkit(source=src.Source(
-        tfma=self._tfma_source(input_dict),
-        tfdv=self._tfdv_source(input_dict),
-        model=self._model_source(input_dict)),
-                                output_dir=artifact_utils.get_single_instance(
-                                    output_dict['model_card']).uri)
+        tfma=self._tfma_source(input_dict, exec_properties),
+        tfdv=self._tfdv_source(input_dict, exec_properties),
+        model=self._model_source(input_dict),
+    ),
+                                output_dir=temp_output_dir)
     template_io = exec_properties.get('template_io') or [
         (mct.default_template, _DEFAULT_MODEL_CARD_FILE_NAME)
     ]
@@ -117,3 +148,7 @@ class Executor(BaseExecutor):
     mct.scaffold_assets(json=exec_properties.get('json'))
     for template_path, output_file in template_io:
       mct.export_format(template_path=template_path, output_file=output_file)
+
+    # Copy all files to output_dir
+    output_dir = artifact_utils.get_single_uri(output_dict["model_card"])
+    io_utils.copy_dir(src=temp_output_dir, dst=output_dir)
